@@ -16,20 +16,20 @@
                 quaternary
                 circle
                 type="error"
-                aria-label="删除主机信任"
+                :aria-label="`删除 ${entry.endpoint} 的全部主机信任记录`"
                 @click="requestDelete(entry.endpoint)"
               >
                 <template #icon><n-icon :component="TrashOutline" /></template>
               </n-button>
             </template>
-            删除主机信任
+            删除该端点的全部信任记录
           </n-tooltip>
         </div>
       </div>
     </n-spin>
 
     <n-modal v-model:show="showDelete" preset="dialog" title="删除主机信任" type="warning">
-      <span>删除 {{ deletingEndpoint }} 的已信任指纹？下次连接将重新确认。</span>
+      <span>删除 {{ deletingEndpoint }} 的全部已信任指纹？下次连接将重新确认该端点。</span>
       <template #action>
         <n-space justify="end">
           <n-button @click="showDelete = false">取消</n-button>
@@ -89,7 +89,7 @@ async function confirmDelete() {
     await invoke('delete_host_trust', { endpoint: deletingEndpoint.value })
     showDelete.value = false
     await loadEntries()
-    message.success('主机信任已删除')
+    message.success('该端点的全部主机信任记录已删除')
   } catch (reason) {
     message.error(`删除失败: ${reason}`)
   } finally {
@@ -107,4 +107,11 @@ async function confirmDelete() {
 .trust-main strong { font-size: 13px; }
 .trust-main span { color: #8899aa; font-size: 12px; }
 .trust-main code { color: #c9d5e0; overflow-wrap: anywhere; font-size: 12px; }
+
+@media (max-width: 520px) {
+  .trust-row :deep(.n-button) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
 </style>

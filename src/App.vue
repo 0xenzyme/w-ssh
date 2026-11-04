@@ -3,16 +3,19 @@
     <n-message-provider>
       <div class="app-layout">
         <!-- 顶部统一 Tab 栏 -->
-        <div class="top-tab-bar">
+        <div class="top-tab-bar" role="tablist" aria-label="工作区">
           <!-- Vaults 固定 Tab -->
-          <div
-            class="tab-item"
+          <button
+            type="button"
+            class="tab-item tab-select"
             :class="{ active: activeTopTab === 'vaults' }"
-            @click="activeTopTab = 'vaults'"
+            role="tab"
+            :aria-selected="activeTopTab === 'vaults'"
+            @click="selectTopTab('vaults')"
           >
             <n-icon :component="GridOutline" class="tab-icon" />
-            <span class="tab-name">Vaults</span>
-          </div>
+            <span class="tab-name">主机</span>
+          </button>
 
           <!-- 终端动态 Tab -->
           <div
@@ -20,19 +23,29 @@
             :key="tab.id"
             class="tab-item"
             :class="{ active: activeTopTab === tab.id, disconnected: !tab.connected }"
-            @click="activeTopTab = tab.id"
           >
-            <n-icon
-              :component="tab.connected ? TerminalOutline : AlertCircleOutline"
-              class="tab-icon"
-            />
-            <span class="tab-name">{{ tab.session_name }}</span>
+            <button
+              type="button"
+              class="tab-select"
+              role="tab"
+              :aria-selected="activeTopTab === tab.id"
+              :aria-label="`${terminalTabLabel(tab)}${tab.connected ? '' : '，连接已断开'}`"
+              :title="terminalTabLabel(tab)"
+              @click="selectTopTab(tab.id)"
+            >
+              <n-icon
+                :component="tab.connected ? TerminalOutline : AlertCircleOutline"
+                class="tab-icon"
+              />
+              <span class="tab-name">{{ terminalTabLabel(tab) }}</span>
+            </button>
             <n-button
               quaternary
               circle
               size="tiny"
               class="tab-close"
-              @click.stop="handleCloseTab(tab.id)"
+              :aria-label="`关闭 ${tab.session_name} 终端`"
+              @click.stop="requestCloseTab(tab)"
             >
               <template #icon><n-icon :component="CloseOutline" /></template>
             </n-button>
@@ -42,32 +55,55 @@
           <div class="tab-spacer" />
 
           <!-- 新建按钮 -->
-          <div class="tab-new-btn" @click="activeTopTab = 'vaults'">
+          <button
+            type="button"
+            class="tab-new-btn"
+            aria-label="新建主机"
+            title="新建主机"
+            @click="handleNewHost"
+          >
             <n-icon :component="AddOutline" />
-          </div>
+          </button>
         </div>
 
         <!-- 内容区 -->
         <div class="content-area">
-          <VaultsView v-show="activeTopTab === 'vaults'" />
+          <VaultsView ref="vaultsRef" v-show="activeTopTab === 'vaults'" />
           <TerminalPanel
             v-for="tab in terminalsStore.tabs"
             :key="tab.id"
             :terminal-id="tab.id"
             :active="tab.id === activeTopTab"
+            :connected="tab.connected"
             v-show="activeTopTab === tab.id"
             @closed="terminalsStore.markDisconnected(tab.id)"
+            @reconnect="handleReconnect(tab)"
+            @back="selectTopTab('vaults')"
           />
         </div>
+
+        <n-modal v-model:show="showCloseConfirm" preset="dialog" title="断开并关闭终端" type="warning">
+          <span>关闭「{{ closingTab?.session_name }}」会立即断开当前 SSH 会话。</span>
+          <n-alert v-if="closeError" type="error" :show-icon="false" class="close-error">
+            {{ closeError }}
+          </n-alert>
+          <template #action>
+            <n-space justify="end">
+              <n-button @click="showCloseConfirm = false">继续使用</n-button>
+              <n-button type="error" :loading="closing" @click="confirmCloseTab">断开并关闭</n-button>
+            </n-space>
+          </template>
+        </n-modal>
       </div>
     </n-message-provider>
   </n-config-provider>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
-import { NConfigProvider, NMessageProvider, NButton, NIcon, darkTheme } from 'naive-ui'
+import { nextTick, ref, watch } from 'vue'
+import { NAlert, NConfigProvider, NMessageProvider, NButton, NIcon, NModal, NSpace, darkTheme } from 'naive-ui'
 import type { GlobalThemeOverrides } from 'naive-ui'
+import type { TerminalTab } from './types'
 import {
   GridOutline,
   TerminalOutline,
@@ -81,6 +117,11 @@ import { useTerminalsStore } from './stores/terminals'
 
 const terminalsStore = useTerminalsStore()
 const activeTopTab = ref<string>('vaults')
+const vaultsRef = ref<InstanceType<typeof VaultsView> | null>(null)
+const showCloseConfirm = ref(false)
+const closingTab = ref<TerminalTab | null>(null)
+const closing = ref(false)
+const closeError = ref('')
 
 // 同步：终端 store 打开新终端时，自动切换到该 Tab
 watch(
@@ -90,11 +131,59 @@ watch(
   },
 )
 
-async function handleCloseTab(terminalId: string) {
-  await terminalsStore.closeTab(terminalId)
-  if (terminalsStore.tabs.length === 0) {
-    activeTopTab.value = 'vaults'
+function selectTopTab(tabId: string) {
+  activeTopTab.value = tabId
+  terminalsStore.selectTab(tabId === 'vaults' ? null : tabId)
+}
+
+function terminalTabLabel(tab: TerminalTab) {
+  const matching = terminalsStore.tabs.filter(item => item.session_name === tab.session_name)
+  if (matching.length < 2) return tab.session_name
+  return `${tab.session_name} · ${matching.findIndex(item => item.id === tab.id) + 1}`
+}
+
+function requestCloseTab(tab: TerminalTab) {
+  if (!tab.connected) {
+    void closeTab(tab.id)
+    return
   }
+  closingTab.value = tab
+  closeError.value = ''
+  showCloseConfirm.value = true
+}
+
+async function closeTab(terminalId: string) {
+  const wasVisible = activeTopTab.value === terminalId
+  await terminalsStore.closeTab(terminalId)
+  if (wasVisible || !terminalsStore.tabs.some(tab => tab.id === activeTopTab.value)) {
+    activeTopTab.value = terminalsStore.activeTabId ?? 'vaults'
+  }
+}
+
+async function confirmCloseTab() {
+  if (!closingTab.value) return
+  closing.value = true
+  try {
+    await closeTab(closingTab.value.id)
+    showCloseConfirm.value = false
+    closingTab.value = null
+  } catch (error) {
+    closeError.value = `无法断开连接，请重试：${error}`
+  } finally {
+    closing.value = false
+  }
+}
+
+async function handleNewHost() {
+  selectTopTab('vaults')
+  await nextTick()
+  vaultsRef.value?.openNewHost()
+}
+
+async function handleReconnect(tab: TerminalTab) {
+  selectTopTab('vaults')
+  await nextTick()
+  vaultsRef.value?.connectSessionById(tab.session_id)
 }
 
 const themeOverrides: GlobalThemeOverrides = {
@@ -127,6 +216,14 @@ html, body, #app {
   overflow: hidden;
   background: #0d1117;
 }
+
+@media (max-width: 520px) {
+  .n-dialog__close,
+  .n-card-header__close {
+    width: 44px !important;
+    height: 44px !important;
+  }
+}
 </style>
 
 <style scoped>
@@ -141,7 +238,7 @@ html, body, #app {
 .top-tab-bar {
   display: flex;
   align-items: center;
-  height: 40px;
+  height: 44px;
   flex-shrink: 0;
   background: #090c11;
   border-bottom: 1px solid #21283a;
@@ -155,14 +252,24 @@ html, body, #app {
 .tab-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 14px;
   height: 100%;
-  cursor: pointer;
   white-space: nowrap;
-  color: #4a5568;
-  font-size: 12px;
+  color: #9aa9ba;
   transition: background 0.15s, color 0.15s;
+}
+
+.tab-select {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 14px;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }
 
 .tab-item:hover {
@@ -176,6 +283,12 @@ html, body, #app {
   border-bottom: 2px solid #6b9cf8;
 }
 
+.tab-select:focus-visible,
+.tab-new-btn:focus-visible {
+  outline: 2px solid #93b4fb;
+  outline-offset: -3px;
+}
+
 .tab-item.disconnected .tab-icon {
   color: #f87171;
 }
@@ -187,11 +300,14 @@ html, body, #app {
 }
 
 .tab-close {
-  opacity: 0;
+  width: 36px;
+  height: 40px;
+  opacity: 0.65;
   margin-left: 2px;
 }
 
-.tab-item:hover .tab-close {
+.tab-item:hover .tab-close,
+.tab-close:focus-visible {
   opacity: 1;
 }
 
@@ -203,12 +319,15 @@ html, body, #app {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
+  width: 44px;
   height: 100%;
   cursor: pointer;
   color: #4a5568;
   font-size: 18px;
   flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
   transition: color 0.15s, background 0.15s;
 }
 
@@ -227,5 +346,16 @@ html, body, #app {
 .content-area > * {
   position: absolute;
   inset: 0;
+}
+
+.close-error {
+  margin-top: 12px;
+}
+
+@media (max-width: 520px) {
+  .tab-close {
+    width: 44px;
+    height: 44px;
+  }
 }
 </style>

@@ -22,12 +22,12 @@ A lightweight, cross-platform SSH session manager built with Tauri 2 and Vue 3.
 ### Current development
 
 - **Dual local storage**: Choose the existing SQLite database or an absolute `.yml` file from Storage Settings
-- **Explicit copy and switch**: Copy only to an empty target, verify every session, keep the source, then switch
+- **Explicit copy and switch**: Copy only to an empty target, verify every session and group, keep the source, then switch
 - **Host trust**: First use shows a SHA-256 fingerprint; changed keys are blocked until explicitly replaced
 - **Credential boundary**: Session DTOs, SQLite, and YAML contain no new passwords or passphrases; saving uses the OS credential store and one-time input remains available
 - **Legacy SQLite migration**: Existing plaintext passwords are quarantined and require an explicit verified migration or explicit deletion
 - **YAML integrity**: Strict schema validation, serialized writes, atomic replacement, and recovery backups before canonicalizing commented files
-- **Host and group organization**: Double-click host cards to connect, choose host/group icons, select groups from a searchable dropdown, and atomically rename groups
+- **Host and group organization**: Use visible host actions to connect and manage credentials, create or delete empty groups from the sidebar, choose host/group icons, select groups from a searchable dropdown, and atomically rename groups
 
 ### v0.2.0
 

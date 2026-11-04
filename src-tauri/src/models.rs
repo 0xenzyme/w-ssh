@@ -68,6 +68,20 @@ pub struct UpdateSession {
     pub group_icon: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGroup {
+    pub name: String,
+    pub icon: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateGroup {
+    pub name: String,
+    pub icon: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateGroup {
     pub current_name: String,

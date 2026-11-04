@@ -8,7 +8,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::db::SqliteSessionStorage;
-use crate::models::{CreateSession, Session, UpdateGroup, UpdateSession};
+use crate::models::{
+    CreateGroup, CreateSession, Session, SessionGroup, UpdateGroup, UpdateSession,
+};
 use crate::storage::SessionStorage;
 use crate::yaml_storage::YamlSessionStorage;
 
@@ -148,16 +150,22 @@ impl StorageManager {
         }
 
         let target = open_selected_storage(&target_settings, &self.sqlite).await?;
-        if !target.list().await?.is_empty() {
+        if !target.list().await?.is_empty() || !target.list_groups().await?.is_empty() {
             bail!("目标存储非空，复制已取消；源数据和当前后端未改变");
         }
 
         let source_sessions = source.list().await?;
-        target.import_if_empty(source_sessions.clone()).await?;
+        let source_groups = source.list_groups().await?;
+        target
+            .import_if_empty(source_sessions.clone(), source_groups.clone())
+            .await?;
         let copied_sessions = target.list().await?;
+        let copied_groups = target.list_groups().await?;
         verify_copy(
             source_sessions.clone(),
             copied_sessions,
+            source_groups,
+            copied_groups,
             target_settings.backend,
         )?;
 
@@ -210,9 +218,21 @@ impl SessionStorage for StorageManager {
         Ok(decorated)
     }
 
+    async fn list_groups(&self) -> Result<Vec<SessionGroup>> {
+        self.current_storage().await?.list_groups().await
+    }
+
     async fn get(&self, id: &str) -> Result<Session> {
         let session = self.current_storage().await?.get(id).await?;
         self.decorate(session).await
+    }
+
+    async fn create_group(&self, data: CreateGroup) -> Result<SessionGroup> {
+        self.current_storage().await?.create_group(data).await
+    }
+
+    async fn delete_group(&self, name: &str) -> Result<()> {
+        self.current_storage().await?.delete_group(name).await
     }
 
     async fn create(&self, data: CreateSession) -> Result<Session> {
@@ -239,10 +259,14 @@ impl SessionStorage for StorageManager {
         self.current_storage().await?.delete(id).await
     }
 
-    async fn import_if_empty(&self, sessions: Vec<Session>) -> Result<()> {
+    async fn import_if_empty(
+        &self,
+        sessions: Vec<Session>,
+        groups: Vec<SessionGroup>,
+    ) -> Result<()> {
         self.current_storage()
             .await?
-            .import_if_empty(sessions)
+            .import_if_empty(sessions, groups)
             .await
     }
 
@@ -329,6 +353,8 @@ fn persist_settings(path: &Path, settings: &StorageSettingsFile) -> Result<()> {
 fn verify_copy(
     mut source: Vec<Session>,
     mut target: Vec<Session>,
+    mut source_groups: Vec<SessionGroup>,
+    mut target_groups: Vec<SessionGroup>,
     _backend: StorageBackend,
 ) -> Result<()> {
     for session in &mut source {
@@ -339,7 +365,9 @@ fn verify_copy(
     }
     source.sort_by(|a, b| a.id.cmp(&b.id));
     target.sort_by(|a, b| a.id.cmp(&b.id));
-    if source != target {
+    source_groups.sort_by(|a, b| a.name.cmp(&b.name));
+    target_groups.sort_by(|a, b| a.name.cmp(&b.name));
+    if source != target || source_groups != target_groups {
         bail!("复制后逐字段校验失败；当前后端未切换，源数据未删除");
     }
     Ok(())

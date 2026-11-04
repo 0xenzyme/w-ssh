@@ -22,6 +22,24 @@ pub async fn get_sessions(state: State<'_, AppState>) -> CmdResult<Vec<Session>>
 }
 
 #[tauri::command]
+pub async fn get_groups(state: State<'_, AppState>) -> CmdResult<Vec<SessionGroup>> {
+    state.storage.list_groups().await.map_err(to_str)
+}
+
+#[tauri::command]
+pub async fn create_group(
+    state: State<'_, AppState>,
+    data: CreateGroup,
+) -> CmdResult<SessionGroup> {
+    state.storage.create_group(data).await.map_err(to_str)
+}
+
+#[tauri::command]
+pub async fn delete_group(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    state.storage.delete_group(&name).await.map_err(to_str)
+}
+
+#[tauri::command]
 pub async fn create_session(state: State<'_, AppState>, data: CreateSession) -> CmdResult<Session> {
     state.storage.create(data).await.map_err(to_str)
 }

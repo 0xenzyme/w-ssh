@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_saphyr::granit_parser::{Event, Parser};
 use serde_saphyr::options::MergeKeyPolicy;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::models::{
-    AuthMethod, CreateSession, CredentialState, Session, UpdateGroup, UpdateSession,
+    AuthMethod, CreateGroup, CreateSession, CredentialState, Session, SessionGroup, UpdateGroup,
+    UpdateSession,
 };
 use crate::storage::{now_str, SessionStorage};
 
@@ -24,6 +25,8 @@ const MAX_YAML_BYTES: u64 = 4 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 struct YamlDocument {
     schema_version: u32,
+    #[serde(default)]
+    groups: Vec<YamlGroup>,
     sessions: Vec<YamlSession>,
 }
 
@@ -31,9 +34,19 @@ impl Default for YamlDocument {
     fn default() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
+            groups: Vec::new(),
             sessions: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct YamlGroup {
+    name: String,
+    icon: String,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,8 +122,9 @@ impl YamlSessionStorage {
         let (value, recovery) =
             tokio::task::spawn_blocking(move || -> Result<(T, Option<PathBuf>)> {
                 let (mut document, raw) = load_or_create(&path)?;
+                let materialized_groups = materialize_derived_groups(&mut document);
                 let (value, changed) = change(&mut document)?;
-                if !changed {
+                if !changed && !materialized_groups {
                     return Ok((value, None));
                 }
                 validate_document(&document)?;
@@ -144,6 +158,10 @@ impl SessionStorage for YamlSessionStorage {
         Ok(sessions)
     }
 
+    async fn list_groups(&self) -> Result<Vec<SessionGroup>> {
+        Ok(merged_groups(&self.read_document().await?))
+    }
+
     async fn get(&self, id: &str) -> Result<Session> {
         self.read_document()
             .await?
@@ -154,10 +172,60 @@ impl SessionStorage for YamlSessionStorage {
             .ok_or_else(|| anyhow!("会话不存在: {id}"))
     }
 
-    async fn create(&self, data: CreateSession) -> Result<Session> {
-        let session = yaml_session_from_create(data)?;
-        let result = Session::from(session.clone());
+    async fn create_group(&self, data: CreateGroup) -> Result<SessionGroup> {
+        let name = data.name.trim().to_owned();
+        validate_group_fields(&name, data.icon.as_deref())?;
+        let group = YamlGroup {
+            name,
+            icon: data.icon.unwrap_or_else(|| "folder".into()),
+            created_at: now_str(),
+            updated_at: now_str(),
+        };
+        let result = SessionGroup::from(group.clone());
         self.mutate(move |document| {
+            if merged_groups(document)
+                .iter()
+                .any(|existing| existing.name == group.name)
+            {
+                bail!("分组已存在，请使用其他名称");
+            }
+            document.groups.push(group);
+            Ok((result, true))
+        })
+        .await
+    }
+
+    async fn delete_group(&self, name: &str) -> Result<()> {
+        let name = name.trim().to_owned();
+        validate_group_fields(&name, None)?;
+        self.mutate(move |document| {
+            if document
+                .sessions
+                .iter()
+                .any(|session| session.group_name.as_deref() == Some(name.as_str()))
+            {
+                bail!("分组中仍有主机，请先移动或删除这些主机");
+            }
+            let previous = document.groups.len();
+            document.groups.retain(|group| group.name != name);
+            if document.groups.len() == previous {
+                bail!("分组不存在: {name}");
+            }
+            Ok(((), true))
+        })
+        .await
+    }
+
+    async fn create(&self, data: CreateSession) -> Result<Session> {
+        let mut session = yaml_session_from_create(data)?;
+        self.mutate(move |document| {
+            ensure_yaml_group(
+                document,
+                session.group_name.as_deref(),
+                session.group_icon.as_deref(),
+            )?;
+            session.group_icon = group_icon(document, session.group_name.as_deref());
+            let result = Session::from(session.clone());
             document.sessions.push(session);
             Ok((result, true))
         })
@@ -165,8 +233,14 @@ impl SessionStorage for YamlSessionStorage {
     }
 
     async fn update(&self, data: UpdateSession) -> Result<Session> {
-        let replacement = yaml_session_from_update(data)?;
+        let mut replacement = yaml_session_from_update(data)?;
         self.mutate(move |document| {
+            ensure_yaml_group(
+                document,
+                replacement.group_name.as_deref(),
+                replacement.group_icon.as_deref(),
+            )?;
+            replacement.group_icon = group_icon(document, replacement.group_name.as_deref());
             let current = document
                 .sessions
                 .iter_mut()
@@ -186,16 +260,31 @@ impl SessionStorage for YamlSessionStorage {
         let name = data.name.trim().to_owned();
         validate_group(&current_name, &name, data.icon.as_deref())?;
         self.mutate(move |document| {
-            if current_name != name
-                && document
-                    .sessions
-                    .iter()
-                    .any(|session| session.group_name.as_deref() == Some(name.as_str()))
-            {
+            let existing = merged_groups(document);
+            if !existing.iter().any(|group| group.name == current_name) {
+                bail!("分组不存在: {current_name}");
+            }
+            if current_name != name && existing.iter().any(|group| group.name == name) {
                 bail!("目标分组已存在，请使用其他名称");
             }
 
             let now = now_str();
+            if let Some(group) = document
+                .groups
+                .iter_mut()
+                .find(|group| group.name == current_name)
+            {
+                group.name = name.clone();
+                group.icon = data.icon.clone().unwrap_or_else(|| "folder".into());
+                group.updated_at = now.clone();
+            } else {
+                document.groups.push(YamlGroup {
+                    name: name.clone(),
+                    icon: data.icon.clone().unwrap_or_else(|| "folder".into()),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                });
+            }
             let mut updated = Vec::new();
             for session in &mut document.sessions {
                 if session.group_name.as_deref() == Some(current_name.as_str()) {
@@ -204,9 +293,6 @@ impl SessionStorage for YamlSessionStorage {
                     session.updated_at = now.clone();
                     updated.push(Session::from(session.clone()));
                 }
-            }
-            if updated.is_empty() {
-                bail!("分组不存在: {current_name}");
             }
             Ok((updated, true))
         })
@@ -223,15 +309,21 @@ impl SessionStorage for YamlSessionStorage {
         .await
     }
 
-    async fn import_if_empty(&self, sessions: Vec<Session>) -> Result<()> {
+    async fn import_if_empty(
+        &self,
+        sessions: Vec<Session>,
+        groups: Vec<SessionGroup>,
+    ) -> Result<()> {
         let imported = sessions
             .into_iter()
             .map(yaml_session_from_session)
             .collect::<Result<Vec<_>>>()?;
+        let imported_groups = groups.into_iter().map(YamlGroup::from).collect();
         self.mutate(move |document| {
-            if !document.sessions.is_empty() {
+            if !document.sessions.is_empty() || !document.groups.is_empty() {
                 bail!("YAML 目标存储非空，复制已取消");
             }
+            document.groups = imported_groups;
             document.sessions = imported;
             Ok(((), true))
         })
@@ -335,6 +427,13 @@ fn validate_document(document: &YamlDocument) -> Result<()> {
         bail!("不支持的 YAML schema_version: {}", document.schema_version);
     }
     let mut ids = HashSet::new();
+    let mut group_names = HashSet::new();
+    for group in &document.groups {
+        validate_group_record(group)?;
+        if !group_names.insert(group.name.as_str()) {
+            bail!("YAML 包含重复分组名称: {}", group.name);
+        }
+    }
     for session in &document.sessions {
         validate_session(session)?;
         if !ids.insert(session.id.as_str()) {
@@ -461,6 +560,7 @@ fn yaml_auth(auth_method: AuthMethod, private_key: Option<String>) -> Result<Yam
 
 fn serialize_document(document: &YamlDocument) -> Result<String> {
     let mut stable = document.clone();
+    stable.groups.sort_by(|a, b| a.name.cmp(&b.name));
     stable.sessions.sort_by(|a, b| {
         a.group_name
             .cmp(&b.group_name)
@@ -578,21 +678,153 @@ impl From<YamlSession> for Session {
     }
 }
 
+impl From<YamlGroup> for SessionGroup {
+    fn from(value: YamlGroup) -> Self {
+        Self {
+            name: value.name,
+            icon: value.icon,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+impl From<SessionGroup> for YamlGroup {
+    fn from(value: SessionGroup) -> Self {
+        Self {
+            name: value.name,
+            icon: value.icon,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
 fn validate_group(current_name: &str, name: &str, icon: Option<&str>) -> Result<()> {
-    if current_name.is_empty() || name.is_empty() {
+    validate_group_fields(current_name, icon)?;
+    validate_group_fields(name, icon)
+}
+
+fn validate_group_fields(name: &str, icon: Option<&str>) -> Result<()> {
+    if name.is_empty() {
         bail!("分组名称不能为空");
     }
-    if current_name.len() > 200
-        || name.len() > 200
-        || current_name.contains('\0')
-        || name.contains('\0')
-    {
+    if name.len() > 200 || name.contains('\0') {
         bail!("分组名称无效或过长");
     }
     if icon.is_some_and(|value| value.len() > 64 || value.contains('\0')) {
         bail!("分组图标无效");
     }
     Ok(())
+}
+
+fn validate_group_record(group: &YamlGroup) -> Result<()> {
+    validate_group_fields(&group.name, Some(&group.icon))?;
+    if group.created_at.trim().is_empty()
+        || group.updated_at.trim().is_empty()
+        || group.created_at.contains('\0')
+        || group.updated_at.contains('\0')
+    {
+        bail!("YAML 分组时间字段无效");
+    }
+    Ok(())
+}
+
+fn merged_groups(document: &YamlDocument) -> Vec<SessionGroup> {
+    let mut groups: BTreeMap<String, SessionGroup> = document
+        .groups
+        .iter()
+        .cloned()
+        .map(SessionGroup::from)
+        .map(|group| (group.name.clone(), group))
+        .collect();
+    for session in &document.sessions {
+        let Some(name) = session
+            .group_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        groups
+            .entry(name.to_owned())
+            .or_insert_with(|| SessionGroup {
+                name: name.to_owned(),
+                icon: session
+                    .group_icon
+                    .clone()
+                    .unwrap_or_else(|| "folder".into()),
+                created_at: session.created_at.clone(),
+                updated_at: session.updated_at.clone(),
+            });
+    }
+    groups.into_values().collect()
+}
+
+fn materialize_derived_groups(document: &mut YamlDocument) -> bool {
+    let mut known: HashSet<String> = document
+        .groups
+        .iter()
+        .map(|group| group.name.clone())
+        .collect();
+    let mut derived = Vec::new();
+    for session in &document.sessions {
+        let Some(name) = session
+            .group_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        if known.insert(name.to_owned()) {
+            derived.push(YamlGroup {
+                name: name.to_owned(),
+                icon: session
+                    .group_icon
+                    .clone()
+                    .unwrap_or_else(|| "folder".into()),
+                created_at: session.created_at.clone(),
+                updated_at: session.updated_at.clone(),
+            });
+        }
+    }
+    let changed = !derived.is_empty();
+    document.groups.extend(derived);
+    changed
+}
+
+fn ensure_yaml_group(
+    document: &mut YamlDocument,
+    name: Option<&str>,
+    icon: Option<&str>,
+) -> Result<()> {
+    let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+        return Ok(());
+    };
+    validate_group_fields(name, icon)?;
+    if !merged_groups(document)
+        .iter()
+        .any(|group| group.name == name)
+    {
+        let now = now_str();
+        document.groups.push(YamlGroup {
+            name: name.to_owned(),
+            icon: icon.unwrap_or("folder").to_owned(),
+            created_at: now.clone(),
+            updated_at: now,
+        });
+    }
+    Ok(())
+}
+
+fn group_icon(document: &YamlDocument, name: Option<&str>) -> Option<String> {
+    let name = name?.trim();
+    merged_groups(document)
+        .into_iter()
+        .find(|group| group.name == name)
+        .map(|group| group.icon)
 }
 
 #[cfg(test)]
@@ -649,6 +881,38 @@ mod tests {
         cleanup(&path);
     }
 
+    #[tokio::test]
+    async fn legacy_session_groups_are_materialized_before_the_last_host_moves() {
+        let path = temp_yaml("legacy-groups");
+        std::fs::write(
+            &path,
+            "schema_version: 1\nsessions:\n  - id: legacy-host\n    name: Legacy host\n    host: legacy.test\n    port: 22\n    username: user\n    group_name: Legacy\n    group_icon: cloud\n    auth: { method: password }\n    created_at: '1'\n    updated_at: '1'\n",
+        )
+        .unwrap();
+        let storage = YamlSessionStorage::open(path.clone()).await.unwrap();
+        let current = storage.get("legacy-host").await.unwrap();
+        storage
+            .update(UpdateSession {
+                id: current.id,
+                name: current.name,
+                host: current.host,
+                port: current.port,
+                username: current.username,
+                private_key: current.private_key,
+                auth_method: current.auth_method,
+                icon: current.icon,
+                group_name: Some("Current".into()),
+                group_icon: Some("folder".into()),
+            })
+            .await
+            .unwrap();
+
+        let groups = storage.list_groups().await.unwrap();
+        assert!(groups.iter().any(|group| group.name == "Legacy"));
+        assert!(groups.iter().any(|group| group.name == "Current"));
+        cleanup(&path);
+    }
+
     #[test]
     fn rejects_schema_corruption_duplicate_ids_and_invalid_ports() {
         for invalid in [
@@ -683,6 +947,7 @@ mod tests {
         std::fs::write(&path, &original).unwrap();
         let replacement = YamlDocument {
             schema_version: 1,
+            groups: vec![],
             sessions: vec![],
         };
         let result = atomic_write_with_hook(

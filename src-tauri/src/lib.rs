@@ -53,6 +53,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_sessions,
+            commands::get_groups,
+            commands::create_group,
+            commands::delete_group,
             commands::create_session,
             commands::update_session,
             commands::update_group,

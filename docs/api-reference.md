@@ -66,14 +66,40 @@ invoke<Session>('update_session', { data: UpdateSession })
 
 ---
 
+#### `get_groups`
+
+Returns persisted group metadata, including groups with no sessions.
+
+```typescript
+invoke<StoredGroup[]>('get_groups')
+```
+
+#### `create_group`
+
+Creates an empty group. Duplicate and empty names are rejected.
+
+```typescript
+invoke<StoredGroup>('create_group', {
+  data: { name: 'Production', icon: 'cloud' },
+})
+```
+
 #### `update_group`
 
-Atomically renames a non-empty group and updates its icon across every session in the group. Renaming to an existing group is rejected.
+Atomically renames a group and updates its icon across every session in the group. Empty groups are supported; renaming to an existing group is rejected.
 
 ```typescript
 invoke<Session[]>('update_group', {
   data: { current_name: 'Production', name: 'Production EU', icon: 'cloud' },
 })
+```
+
+#### `delete_group`
+
+Deletes a persisted group only when it contains no hosts. A non-empty or missing group is rejected without modifying host data.
+
+```typescript
+invoke<void>('delete_group', { name: 'Production EU' })
 ```
 
 ---
@@ -136,7 +162,7 @@ invoke<string[]>('get_ssh_key_paths')
 
 **Returns:** Absolute file paths, e.g. `["/home/user/.ssh/id_ed25519"]`
 
-Detected key names are ordered as `id_ed25519`, `id_rsa`, `id_ecdsa`, `id_dsa`, `id_ecdsa_sk`, `id_ed25519_sk`. The UI falls back to `~/.ssh/id_ed25519` when none exist; the SSH backend expands `~/` before reading.
+Detected key names are ordered as `id_ed25519`, `id_rsa`, `id_ecdsa`, `id_dsa`, `id_ecdsa_sk`, `id_ed25519_sk`. When none exist, the UI asks for an explicit path instead of assuming a file exists; the SSH backend expands `~/` before reading.
 
 ---
 

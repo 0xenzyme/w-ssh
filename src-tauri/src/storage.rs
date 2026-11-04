@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::models::{CreateSession, Session, UpdateGroup, UpdateSession};
+use crate::models::{
+    CreateGroup, CreateSession, Session, SessionGroup, UpdateGroup, UpdateSession,
+};
 
 pub fn now_str() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,12 +17,19 @@ pub fn now_str() -> String {
 #[async_trait]
 pub trait SessionStorage: Send + Sync {
     async fn list(&self) -> Result<Vec<Session>>;
+    async fn list_groups(&self) -> Result<Vec<SessionGroup>>;
     async fn get(&self, id: &str) -> Result<Session>;
+    async fn create_group(&self, data: CreateGroup) -> Result<SessionGroup>;
+    async fn delete_group(&self, name: &str) -> Result<()>;
     async fn create(&self, data: CreateSession) -> Result<Session>;
     async fn update(&self, data: UpdateSession) -> Result<Session>;
     async fn update_group(&self, data: UpdateGroup) -> Result<Vec<Session>>;
     async fn delete(&self, id: &str) -> Result<()>;
-    async fn import_if_empty(&self, sessions: Vec<Session>) -> Result<()>;
+    async fn import_if_empty(
+        &self,
+        sessions: Vec<Session>,
+        groups: Vec<SessionGroup>,
+    ) -> Result<()>;
     async fn take_notice(&self) -> Option<String> {
         None
     }
@@ -28,6 +37,33 @@ pub trait SessionStorage: Send + Sync {
 
 #[cfg(test)]
 pub async fn assert_storage_contract(storage: &dyn SessionStorage) {
+    let group = storage
+        .create_group(CreateGroup {
+            name: "contract".into(),
+            icon: Some("folder".into()),
+        })
+        .await
+        .expect("create group should succeed");
+    assert_eq!(storage.list_groups().await.unwrap(), vec![group]);
+
+    storage
+        .create_group(CreateGroup {
+            name: "empty-contract".into(),
+            icon: Some("folder".into()),
+        })
+        .await
+        .expect("create empty group should succeed");
+    storage
+        .delete_group("empty-contract")
+        .await
+        .expect("empty group should be deletable");
+    assert!(storage
+        .list_groups()
+        .await
+        .unwrap()
+        .iter()
+        .all(|group| group.name != "empty-contract"));
+
     let created = storage
         .create(CreateSession {
             name: "Contract Host".into(),
@@ -79,6 +115,19 @@ pub async fn assert_storage_contract(storage: &dyn SessionStorage) {
     assert_eq!(renamed.len(), 1);
     assert_eq!(renamed[0].group_name.as_deref(), Some("renamed-contract"));
     assert_eq!(renamed[0].group_icon.as_deref(), Some("briefcase"));
+    assert!(storage
+        .list_groups()
+        .await
+        .unwrap()
+        .iter()
+        .any(|group| group.name == "renamed-contract"));
+    assert!(storage
+        .list_groups()
+        .await
+        .unwrap()
+        .iter()
+        .any(|group| group.name == "contract"));
+    assert!(storage.delete_group("renamed-contract").await.is_err());
 
     storage
         .delete(&created.id)
@@ -86,4 +135,16 @@ pub async fn assert_storage_contract(storage: &dyn SessionStorage) {
         .expect("delete should succeed");
     assert!(storage.list().await.unwrap().is_empty());
     assert!(storage.get(&created.id).await.is_err());
+    assert!(storage
+        .list_groups()
+        .await
+        .unwrap()
+        .iter()
+        .any(|group| group.name == "renamed-contract"));
+    assert!(storage
+        .list_groups()
+        .await
+        .unwrap()
+        .iter()
+        .any(|group| group.name == "contract"));
 }

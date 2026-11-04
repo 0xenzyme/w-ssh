@@ -1,7 +1,7 @@
 <template>
   <div class="icon-picker" role="radiogroup" aria-label="选择图标">
     <button
-      v-for="option in sessionIconOptions"
+      v-for="(option, index) in sessionIconOptions"
       :key="option.value"
       type="button"
       role="radio"
@@ -10,6 +10,10 @@
       :aria-label="option.label"
       :aria-checked="modelValue === option.value"
       @click="emit('update:modelValue', option.value)"
+      @keydown.left.prevent="selectRelative($event, index, -1)"
+      @keydown.right.prevent="selectRelative($event, index, 1)"
+      @keydown.up.prevent="selectRelative($event, index, -1)"
+      @keydown.down.prevent="selectRelative($event, index, 1)"
     >
       <n-icon :component="resolveSessionIcon(option.value)" :size="18" />
     </button>
@@ -27,6 +31,13 @@ defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [string]
 }>()
+
+function selectRelative(event: KeyboardEvent, index: number, direction: number) {
+  const nextIndex = (index + direction + sessionIconOptions.length) % sessionIconOptions.length
+  emit('update:modelValue', sessionIconOptions[nextIndex].value)
+  const buttons = (event.currentTarget as HTMLElement).parentElement?.querySelectorAll('button')
+  ;(buttons?.item(nextIndex) as HTMLButtonElement | undefined)?.focus()
+}
 </script>
 
 <style scoped>
@@ -41,7 +52,7 @@ const emit = defineEmits<{
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 34px;
+  height: 40px;
   min-width: 34px;
   padding: 0;
   color: #8899aa;
@@ -66,5 +77,12 @@ const emit = defineEmits<{
 .icon-choice:focus-visible {
   outline: 2px solid #93b4fb;
   outline-offset: 2px;
+}
+
+@media (max-width: 520px) {
+  .icon-choice {
+    height: 44px;
+    min-width: 44px;
+  }
 }
 </style>

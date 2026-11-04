@@ -1,5 +1,15 @@
 <template>
-  <div ref="containerRef" class="terminal-container" />
+  <div class="terminal-panel">
+    <div ref="containerRef" class="terminal-container" />
+    <div v-if="!connected" class="disconnected-panel" role="status">
+      <strong>连接已断开</strong>
+      <span>可以重新发起安全连接，或返回主机列表。</span>
+      <div class="disconnected-actions">
+        <n-button type="primary" @click="emit('reconnect')">重新连接</n-button>
+        <n-button @click="emit('back')">返回主机列表</n-button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -9,15 +19,19 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { NButton } from 'naive-ui'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
   terminalId: string
   active: boolean
+  connected: boolean
 }>()
 
 const emit = defineEmits<{
   closed: []
+  reconnect: []
+  back: []
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
@@ -32,10 +46,10 @@ onMounted(async () => {
 
   terminal = new Terminal({
     theme: {
-      background: '#1e1e2e',
-      foreground: '#cdd6f4',
-      cursor: '#f5e0dc',
-      selectionBackground: '#45475a',
+      background: '#0d1117',
+      foreground: '#d7e0ea',
+      cursor: '#93b4fb',
+      selectionBackground: '#33415c',
       black: '#45475a',
       red: '#f38ba8',
       green: '#a6e3a1',
@@ -115,11 +129,60 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.terminal-panel {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #0d1117;
+}
+
 .terminal-container {
   width: 100%;
   height: 100%;
   padding: 4px;
   box-sizing: border-box;
-  background: #1e1e2e;
+  background: #0d1117;
+}
+
+.disconnected-panel {
+  position: absolute;
+  left: 50%;
+  bottom: 32px;
+  display: flex;
+  width: min(460px, calc(100% - 32px));
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  color: #e2e8f0;
+  background: #161b27;
+  border: 1px solid #39445c;
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.42);
+  transform: translateX(-50%);
+}
+
+.disconnected-panel span {
+  color: #aab7c7;
+  font-size: 13px;
+}
+
+.disconnected-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@media (max-width: 520px) {
+  .disconnected-panel {
+    bottom: 16px;
+  }
+
+  .disconnected-actions {
+    flex-direction: column;
+  }
+
+  .disconnected-actions :deep(.n-button) {
+    min-height: 44px;
+  }
 }
 </style>

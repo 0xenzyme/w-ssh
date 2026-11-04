@@ -1,27 +1,45 @@
 <template>
   <div class="vaults-view">
     <!-- 左侧导航 -->
-    <div class="nav-panel">
-      <div class="nav-section-title">Hosts</div>
+    <nav class="nav-panel" aria-label="主机分组">
+      <div class="nav-section-title">主机分组</div>
+      <n-button
+        text
+        size="tiny"
+        class="new-group-button"
+        aria-label="新建分组"
+        @click="openGroupCreator"
+      >
+        <template #icon><n-icon :component="AddOutline" /></template>
+        <span class="new-group-label">新建分组</span>
+      </n-button>
 
-      <div
+      <button
+        type="button"
         class="nav-item"
         :class="{ active: activeNav === 'all' }"
+        :aria-pressed="activeNav === 'all'"
         @click="activeNav = 'all'"
       >
         <n-icon :component="GlobeOutline" class="nav-icon" />
-        <span>All</span>
-      </div>
+        <span>全部主机</span>
+      </button>
 
       <div
         v-for="group in groupNavItems"
         :key="group.name"
-        class="nav-item"
+        class="nav-item-row"
         :class="{ active: activeNav === group.name }"
-        @click="activeNav = group.name"
       >
-        <n-icon :component="resolveSessionIcon(group.icon, 'folder')" class="nav-icon" />
-        <span class="nav-label">{{ group.name }}</span>
+        <button
+          type="button"
+          class="nav-item"
+          :aria-pressed="activeNav === group.name"
+          @click="activeNav = group.name"
+        >
+          <n-icon :component="resolveSessionIcon(group.icon, 'folder')" class="nav-icon" />
+          <span class="nav-label">{{ group.name }}</span>
+        </button>
         <n-button
           v-if="group.editable"
           quaternary
@@ -34,22 +52,7 @@
           <template #icon><n-icon :component="CreateOutline" /></template>
         </n-button>
       </div>
-
-      <div class="nav-divider" />
-
-      <div class="nav-item placeholder" @click="message.info('功能开发中')">
-        <n-icon :component="KeyOutline" class="nav-icon" />
-        <span>Keys</span>
-      </div>
-      <div class="nav-item placeholder" @click="message.info('功能开发中')">
-        <n-icon :component="SwapHorizontalOutline" class="nav-icon" />
-        <span>Port Fwd</span>
-      </div>
-      <div class="nav-item placeholder" @click="message.info('功能开发中')">
-        <n-icon :component="DocumentTextOutline" class="nav-icon" />
-        <span>Logs</span>
-      </div>
-    </div>
+    </nav>
 
     <!-- 右侧内容 -->
     <div class="content-panel">
@@ -108,12 +111,40 @@
         </n-tooltip>
         <n-button size="small" type="primary" @click="handleNewHost">
           <template #icon><n-icon :component="AddOutline" /></template>
-          New Host
+          新建主机
         </n-button>
       </div>
 
       <!-- 卡片区域 -->
       <div class="cards-scroll">
+        <div v-if="sessionsStore.loading" class="state-panel" role="status">
+          <n-spin size="small" />
+          <span>正在读取主机和分组…</span>
+        </div>
+        <div
+          v-else-if="sessionsStore.loadError && sessionsStore.sessions.length === 0"
+          class="state-panel state-error"
+          role="alert"
+        >
+          <n-alert type="error" :show-icon="false">
+            无法读取主机数据。现有数据没有被修改。
+          </n-alert>
+          <div class="state-actions">
+            <n-button type="primary" @click="retryLoad">重新读取</n-button>
+            <n-button @click="showStorageSettings = true">检查存储设置</n-button>
+          </div>
+          <p class="state-detail">{{ sessionsStore.loadError }}</p>
+        </div>
+        <template v-else>
+          <n-alert
+            v-if="sessionsStore.loadError"
+            type="warning"
+            :show-icon="false"
+            class="stale-data-alert"
+          >
+            刷新失败，当前显示的是上次成功读取的数据。
+            <n-button text type="primary" @click="retryLoad">重试</n-button>
+          </n-alert>
         <!-- 全部模式：按 Group 分组展示 -->
         <template v-if="activeNav === 'all'">
           <template v-for="(items, group) in filteredGroupedSessions" :key="group">
@@ -126,14 +157,24 @@
                 v-for="session in items"
                 :key="session.id"
                 :session="session"
+                :disabled="connectionFlowBusy"
                 @connect="handleConnect"
                 @edit="handleEdit"
                 @delete="handleDeleteRequest"
+                @forget-credential="requestForgetCredential"
+                @delete-legacy-credential="requestDeleteLegacyCredential"
               />
             </div>
           </template>
-          <div v-if="Object.keys(filteredGroupedSessions).length === 0" class="empty-hint">
-            暂无主机，点击 New Host 添加
+          <div v-if="Object.keys(filteredGroupedSessions).length === 0" class="empty-hint empty-group-hint">
+            <template v-if="search.trim()">
+              <span>没有匹配“{{ search.trim() }}”的主机</span>
+              <n-button size="small" @click="search = ''">清除搜索</n-button>
+            </template>
+            <template v-else>
+              <span>还没有主机</span>
+              <n-button size="small" type="primary" @click="handleNewHost">添加第一台主机</n-button>
+            </template>
           </div>
         </template>
 
@@ -144,12 +185,25 @@
               v-for="session in currentGroupSessions"
               :key="session.id"
               :session="session"
+              :disabled="connectionFlowBusy"
               @connect="handleConnect"
               @edit="handleEdit"
               @delete="handleDeleteRequest"
+              @forget-credential="requestForgetCredential"
+              @delete-legacy-credential="requestDeleteLegacyCredential"
             />
           </div>
-          <div v-else class="empty-hint">该分组暂无主机</div>
+          <div v-else class="empty-hint empty-group-hint">
+            <template v-if="search.trim()">
+              <span>当前分组中没有匹配“{{ search.trim() }}”的主机</span>
+              <n-button size="small" @click="search = ''">清除搜索</n-button>
+            </template>
+            <template v-else>
+              <span>该分组还没有主机</span>
+              <n-button size="small" type="primary" @click="handleNewHost">添加主机</n-button>
+            </template>
+          </div>
+        </template>
         </template>
       </div>
     </div>
@@ -165,7 +219,7 @@
     <n-modal
       v-model:show="showGroupEditor"
       preset="dialog"
-      title="编辑分组"
+      :title="editingGroupName ? '编辑分组' : '新建分组'"
       :show-icon="false"
     >
       <div class="group-editor">
@@ -180,10 +234,21 @@
         />
         <label>分组图标</label>
         <IconSelect v-model="groupDraft.icon" />
-        <p>修改会同步应用到该分组内的全部主机。</p>
+        <p v-if="editingGroupName">修改会同步应用到该分组内的全部主机。</p>
+        <p v-else>分组创建后可以先留空，稍后再添加主机。</p>
       </div>
       <template #action>
-        <n-space justify="end">
+        <div class="group-actions">
+          <n-button
+            v-if="editingGroupName"
+            type="error"
+            secondary
+            :disabled="editingGroupHasSessions"
+            @click="requestDeleteGroup"
+          >
+            删除空分组
+          </n-button>
+          <n-space justify="end">
           <n-button @click="showGroupEditor = false">取消</n-button>
           <n-button
             type="primary"
@@ -191,9 +256,10 @@
             :disabled="!groupDraft.name.trim()"
             @click="saveGroup"
           >
-            保存分组
+            {{ editingGroupName ? '保存分组' : '创建分组' }}
           </n-button>
-        </n-space>
+          </n-space>
+        </div>
       </template>
     </n-modal>
 
@@ -202,11 +268,43 @@
 
     <!-- 删除确认 -->
     <n-modal v-model:show="showDeleteConfirm" preset="dialog" title="确认删除" type="warning">
-      <span>删除主机「{{ deletingSession?.name }}」？此操作不可撤销。</span>
+      <span>删除主机「{{ deletingSession?.name }}」及其已保存凭据？此操作不可撤销。</span>
       <template #action>
         <n-space justify="end">
           <n-button @click="showDeleteConfirm = false">取消</n-button>
           <n-button type="error" :loading="deleting" @click="confirmDelete">删除</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <n-modal v-model:show="showDeleteGroupConfirm" preset="dialog" title="删除空分组" type="warning">
+      <span>删除分组「{{ editingGroupName }}」？主机数据不会受影响。</span>
+      <template #action>
+        <n-space justify="end">
+          <n-button @click="showDeleteGroupConfirm = false">取消</n-button>
+          <n-button type="error" :loading="deletingGroup" @click="confirmDeleteGroup">删除分组</n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <n-modal
+      v-model:show="showCredentialDeleteConfirm"
+      preset="dialog"
+      :title="credentialDeleteMode === 'legacy' ? '删除旧密码' : '忘记已保存凭据'"
+      type="warning"
+    >
+      <span v-if="credentialDeleteMode === 'legacy'">
+        删除「{{ credentialActionSession?.name }}」隔离的旧版 SQLite 密码？会话资料不会被删除，此操作不可恢复。
+      </span>
+      <span v-else>
+        从系统凭据库中移除「{{ credentialActionSession?.name }}」的凭据？下次连接时需要重新输入。
+      </span>
+      <template #action>
+        <n-space justify="end">
+          <n-button @click="showCredentialDeleteConfirm = false">取消</n-button>
+          <n-button type="error" :loading="deletingCredential" @click="confirmCredentialDelete">
+            {{ credentialDeleteMode === 'legacy' ? '删除旧密码' : '忘记凭据' }}
+          </n-button>
         </n-space>
       </template>
     </n-modal>
@@ -222,16 +320,17 @@
         v-model:value="connectSecret"
         type="password"
         show-password-on="click"
-        :placeholder="pendingSession?.auth_method === 'private_key' ? 'Passphrase（未加密私钥可留空）' : '本次连接密码'"
+        :placeholder="pendingSession?.auth_method === 'private_key' ? '私钥口令（未加密私钥可留空）' : '输入连接密码'"
         autofocus
         @keyup.enter="connectWithCredential"
       />
+      <p class="credential-help">输入内容默认仅用于本次连接，不会自动保存。</p>
       <n-checkbox v-if="connectSecret" v-model:checked="saveConnectCredential" class="save-credential">
-        保存到系统凭据库
+        同时保存到系统凭据库
       </n-checkbox>
       <template #action>
         <n-space justify="end">
-          <n-button @click="showCredentialPrompt = false">取消</n-button>
+          <n-button :disabled="connecting" @click="showCredentialPrompt = false">取消</n-button>
           <n-button
             type="primary"
             :loading="connecting"
@@ -250,7 +349,7 @@
       :title="trustResult?.state === 'changed' ? '主机密钥已变化' : '确认主机指纹'"
       :type="trustResult?.state === 'changed' ? 'error' : 'info'"
       :show-icon="false"
-      @after-leave="trustResult = null"
+      @after-leave="resetTrustPrompt"
     >
       <n-alert :type="trustResult?.state === 'changed' ? 'error' : 'info'" :show-icon="false">
         {{ trustResult?.state === 'changed'
@@ -269,7 +368,7 @@
       </div>
       <template #action>
         <n-space justify="end">
-          <n-button @click="showTrustPrompt = false">取消</n-button>
+          <n-button :disabled="trusting" @click="showTrustPrompt = false">取消</n-button>
           <n-button
             :type="trustResult?.state === 'changed' ? 'error' : 'primary'"
             :loading="trusting"
@@ -281,7 +380,13 @@
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showLegacyPrompt" preset="dialog" title="迁移旧密码" :show-icon="false">
+    <n-modal
+      v-model:show="showLegacyPrompt"
+      preset="dialog"
+      title="迁移旧密码"
+      :show-icon="false"
+      @after-leave="resetPendingConnection"
+    >
       <n-alert type="warning" :show-icon="false">
         此会话仍有旧版 SQLite 密码。应用不会显示或自动使用它。
       </n-alert>
@@ -295,13 +400,23 @@
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showRebindPrompt" preset="dialog" title="确认凭据重新绑定" :show-icon="false">
+    <n-modal
+      v-model:show="showRebindPrompt"
+      preset="dialog"
+      title="确认凭据重新绑定"
+      :show-icon="false"
+      @after-leave="resetPendingConnection"
+    >
       <n-alert type="warning" :show-icon="false">
-        主机、端口、用户名或认证方式已变化。确认后才会把已保存凭据用于当前目标。
+        连接目标已变化。确认后，已保存凭据将用于以下目标：
       </n-alert>
+      <div class="rebind-target">
+        <code>{{ pendingSession?.username }}@{{ pendingSession?.host }}:{{ pendingSession?.port }}</code>
+        <span>{{ pendingSession?.auth_method === 'private_key' ? '私钥认证' : '密码认证' }}</span>
+      </div>
       <template #action>
         <n-space justify="end">
-          <n-button @click="showRebindPrompt = false">取消</n-button>
+          <n-button :disabled="connecting" @click="showRebindPrompt = false">取消</n-button>
           <n-button type="primary" :loading="connecting" @click="rebindAndConnect">确认并连接</n-button>
         </n-space>
       </template>
@@ -313,13 +428,10 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import {
-  NAlert, NCheckbox, NIcon, NInput, NButton, NModal, NSpace, NTooltip, useMessage,
+  NAlert, NCheckbox, NIcon, NInput, NButton, NModal, NSpace, NSpin, NTooltip, useMessage,
 } from 'naive-ui'
 import {
   GlobeOutline,
-  KeyOutline,
-  SwapHorizontalOutline,
-  DocumentTextOutline,
   SearchOutline,
   AddOutline,
   SettingsOutline,
@@ -351,6 +463,17 @@ const groupNavItems = computed(() => sessionsStore.groups)
 const activeGroup = computed(() => sessionsStore.groups.find(
   group => group.editable && group.name === activeNav.value,
 ))
+const connectionPreflighting = ref(false)
+const connectionAttempt = ref(0)
+const connectionFlowBusy = computed(() => (
+  connectionPreflighting.value
+  || connecting.value
+  || trusting.value
+  || showTrustPrompt.value
+  || showCredentialPrompt.value
+  || showLegacyPrompt.value
+  || showRebindPrompt.value
+))
 
 // 全部模式：按 Group 过滤+搜索
 const filteredGroupedSessions = computed(() => {
@@ -379,9 +502,16 @@ const currentGroupSessions = computed(() => {
 
 // 连接
 async function handleConnect(session: Session) {
+  if (connectionFlowBusy.value) {
+    message.warning('请先完成或取消当前连接流程')
+    return
+  }
+  const attempt = ++connectionAttempt.value
   pendingSession.value = session
+  connectionPreflighting.value = true
   try {
     const result = await invoke<HostTrustResult>('ssh_trust_preflight', { sessionId: session.id })
+    if (attempt !== connectionAttempt.value || pendingSession.value?.id !== session.id) return
     if (result.state === 'trusted') {
       await continueAfterTrust(session)
       return
@@ -389,15 +519,19 @@ async function handleConnect(session: Session) {
     trustResult.value = result
     showTrustPrompt.value = true
   } catch (e) {
-    pendingSession.value = null
-    message.error(`主机密钥检查失败: ${e}`)
+    if (attempt === connectionAttempt.value) {
+      pendingSession.value = null
+      message.error(`无法检查主机密钥。请确认地址和网络后重试：${e}`)
+    }
+  } finally {
+    if (attempt === connectionAttempt.value) connectionPreflighting.value = false
   }
 }
 
 const showCredentialPrompt = ref(false)
 const pendingSession = ref<Session | null>(null)
 const connectSecret = ref('')
-const saveConnectCredential = ref(true)
+const saveConnectCredential = ref(false)
 const connecting = ref(false)
 const showTrustPrompt = ref(false)
 const trustResult = ref<HostTrustResult | null>(null)
@@ -419,7 +553,7 @@ async function continueAfterTrust(session: Session) {
     showRebindPrompt.value = true
   } else {
     connectSecret.value = ''
-    saveConnectCredential.value = true
+    saveConnectCredential.value = false
     showCredentialPrompt.value = true
   }
 }
@@ -485,8 +619,22 @@ async function connectWithCredential() {
 
 function resetCredentialPrompt() {
   connectSecret.value = ''
-  saveConnectCredential.value = true
+  saveConnectCredential.value = false
   if (!showLegacyPrompt.value && !showRebindPrompt.value) pendingSession.value = null
+}
+
+function resetTrustPrompt() {
+  trustResult.value = null
+  if (!showCredentialPrompt.value && !showLegacyPrompt.value && !showRebindPrompt.value) {
+    pendingSession.value = null
+  }
+}
+
+function resetPendingConnection() {
+  if (!showTrustPrompt.value && !showCredentialPrompt.value
+    && !showLegacyPrompt.value && !showRebindPrompt.value && !connecting.value) {
+    pendingSession.value = null
+  }
 }
 
 async function migrateAndConnect() {
@@ -506,7 +654,7 @@ async function migrateAndConnect() {
 function useOneTimeInstead() {
   showLegacyPrompt.value = false
   connectSecret.value = ''
-  saveConnectCredential.value = true
+  saveConnectCredential.value = false
   showCredentialPrompt.value = true
 }
 
@@ -536,6 +684,15 @@ function handleNewHost() {
   showForm.value = true
 }
 
+function connectSessionById(sessionId: string) {
+  const session = sessionsStore.sessions.find(item => item.id === sessionId)
+  if (!session) {
+    message.error('找不到原主机，请刷新主机列表后重试')
+    return
+  }
+  void handleConnect(session)
+}
+
 function handleEdit(session: Session) {
   editingSession.value = session
   showForm.value = true
@@ -549,6 +706,17 @@ const showGroupEditor = ref(false)
 const savingGroup = ref(false)
 const editingGroupName = ref('')
 const groupDraft = ref({ name: '', icon: 'folder' })
+const showDeleteGroupConfirm = ref(false)
+const deletingGroup = ref(false)
+const editingGroupHasSessions = computed(() => Boolean(
+  sessionsStore.groups.find(group => group.name === editingGroupName.value)?.sessions.length,
+))
+
+function openGroupCreator() {
+  editingGroupName.value = ''
+  groupDraft.value = { name: '', icon: 'folder' }
+  showGroupEditor.value = true
+}
 
 function openGroupEditor(name: string, icon: string) {
   editingGroupName.value = name
@@ -558,23 +726,50 @@ function openGroupEditor(name: string, icon: string) {
 
 async function saveGroup() {
   const name = groupDraft.value.name.trim()
-  if (!name || !editingGroupName.value) return
+  if (!name) return
   savingGroup.value = true
   try {
     const previous = editingGroupName.value
-    await sessionsStore.updateGroup({
-      current_name: previous,
-      name,
-      icon: groupDraft.value.icon,
-    })
-    if (activeNav.value === previous) activeNav.value = name
+    if (previous) {
+      await sessionsStore.updateGroup({
+        current_name: previous,
+        name,
+        icon: groupDraft.value.icon,
+      })
+      if (activeNav.value === previous) activeNav.value = name
+    } else {
+      await sessionsStore.createGroup({ name, icon: groupDraft.value.icon })
+      activeNav.value = name
+    }
     showGroupEditor.value = false
     editingGroupName.value = ''
-    message.success('分组已更新')
+    message.success(previous ? '分组已更新' : '分组已创建')
   } catch (error) {
-    message.error(`分组更新失败: ${error}`)
+    message.error(`${editingGroupName.value ? '分组更新' : '分组创建'}失败: ${error}`)
   } finally {
     savingGroup.value = false
+  }
+}
+
+function requestDeleteGroup() {
+  if (!editingGroupName.value || editingGroupHasSessions.value) return
+  showDeleteGroupConfirm.value = true
+}
+
+async function confirmDeleteGroup() {
+  if (!editingGroupName.value) return
+  deletingGroup.value = true
+  try {
+    await sessionsStore.deleteGroup(editingGroupName.value)
+    message.success('空分组已删除')
+    showDeleteGroupConfirm.value = false
+    showGroupEditor.value = false
+    activeNav.value = 'all'
+    editingGroupName.value = ''
+  } catch (error) {
+    message.error(`无法删除分组：${error}`)
+  } finally {
+    deletingGroup.value = false
   }
 }
 
@@ -586,6 +781,15 @@ async function handleStorageChanged() {
     await sessionsStore.fetchSessions()
   } catch (error) {
     message.error(`无法读取会话: ${error}`)
+  }
+}
+
+async function retryLoad() {
+  try {
+    await storageStore.fetchStatus()
+    await sessionsStore.fetchSessions()
+  } catch {
+    // The persistent state above keeps recovery actions visible.
   }
 }
 
@@ -613,6 +817,46 @@ async function confirmDelete() {
   }
 }
 
+const showCredentialDeleteConfirm = ref(false)
+const credentialActionSession = ref<Session | null>(null)
+const credentialDeleteMode = ref<'stored' | 'legacy'>('stored')
+const deletingCredential = ref(false)
+
+function requestForgetCredential(session: Session) {
+  credentialActionSession.value = session
+  credentialDeleteMode.value = 'stored'
+  showCredentialDeleteConfirm.value = true
+}
+
+function requestDeleteLegacyCredential(session: Session) {
+  credentialActionSession.value = session
+  credentialDeleteMode.value = 'legacy'
+  showCredentialDeleteConfirm.value = true
+}
+
+async function confirmCredentialDelete() {
+  if (!credentialActionSession.value) return
+  deletingCredential.value = true
+  try {
+    if (credentialDeleteMode.value === 'legacy') {
+      await sessionsStore.deleteLegacyCredential(credentialActionSession.value.id)
+      message.success('旧密码已删除，会话资料保持不变')
+    } else {
+      await sessionsStore.deleteCredential(
+        credentialActionSession.value.id,
+        credentialKind(credentialActionSession.value),
+      )
+      message.success('已从系统凭据库中移除凭据')
+    }
+    showCredentialDeleteConfirm.value = false
+    credentialActionSession.value = null
+  } catch (error) {
+    message.error(`无法删除凭据：${error}`)
+  } finally {
+    deletingCredential.value = false
+  }
+}
+
 watch(
   () => sessionsStore.notice,
   notice => {
@@ -630,9 +874,14 @@ onMounted(async () => {
   }
   try {
     await sessionsStore.fetchSessions()
-  } catch (error) {
-    message.error(`无法读取会话: ${error}`)
+  } catch {
+    // The persistent load state keeps the error and recovery actions visible.
   }
+})
+
+defineExpose({
+  openNewHost: handleNewHost,
+  connectSessionById,
 })
 </script>
 
@@ -660,16 +909,16 @@ onMounted(async () => {
 }
 
 .nav-section-title {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
-  color: #374151;
-  text-transform: uppercase;
+  color: #8fa0b3;
   letter-spacing: 0.8px;
   padding: 4px 12px 8px;
 }
 
 .nav-item {
   display: flex;
+  width: calc(100% - 12px);
   align-items: center;
   gap: 9px;
   padding: 8px 10px 8px 12px;
@@ -682,6 +931,10 @@ onMounted(async () => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: start;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
 }
 
 .nav-item:hover {
@@ -689,47 +942,65 @@ onMounted(async () => {
   color: #c9d5e0;
 }
 
-.nav-item.active {
+.nav-item.active,
+.nav-item[aria-pressed="true"] {
   background: rgba(107, 156, 248, 0.10);
   color: #6b9cf8;
   box-shadow: inset 3px 0 0 0 #6b9cf8;
+}
+
+.nav-item:focus-visible {
+  outline: 2px solid #93b4fb;
+  outline-offset: -2px;
+}
+
+.nav-item-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.nav-item-row .nav-item {
+  padding-inline-end: 36px;
+}
+
+.new-group-button {
+  align-self: flex-start;
+  margin: 0 12px 8px;
+  color: #6b9cf8;
+  font-size: 12px;
+}
+
+.new-group-button:hover {
+  color: #8eb4ff;
 }
 
 .nav-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  width: calc(100% - 12px);
+  background: transparent;
+  border: 0;
+  text-align: start;
 }
 
 .group-edit-button {
-  margin-inline-start: auto;
+  position: absolute;
+  right: 10px;
   flex-shrink: 0;
   opacity: 0;
 }
 
-.nav-item:hover .group-edit-button,
-.nav-item:focus-within .group-edit-button,
-.nav-item.active .group-edit-button {
+.nav-item-row:hover .group-edit-button,
+.nav-item-row:focus-within .group-edit-button,
+.nav-item-row.active .group-edit-button {
   opacity: 1;
-}
-
-.nav-item.placeholder {
-  color: #374151;
-}
-
-.nav-item.placeholder:hover {
-  color: #4a5568;
 }
 
 .nav-icon {
   flex-shrink: 0;
   font-size: 15px;
-}
-
-.nav-divider {
-  height: 1px;
-  background: #21283a;
-  margin: 10px 14px;
 }
 
 /* 右侧内容 */
@@ -762,14 +1033,46 @@ onMounted(async () => {
   background: #0d1117;
 }
 
+.state-panel {
+  display: flex;
+  min-height: 220px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #aab7c7;
+  font-size: 13px;
+}
+
+.state-error {
+  flex-direction: column;
+}
+
+.state-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.state-detail {
+  width: min(640px, 100%);
+  color: #8fa0b3;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.stale-data-alert {
+  margin-bottom: 16px;
+}
+
 .group-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
-  color: #374151;
-  text-transform: uppercase;
+  color: #8fa0b3;
   letter-spacing: 0.8px;
   margin-bottom: 12px;
   margin-top: 4px;
@@ -787,9 +1090,16 @@ onMounted(async () => {
 
 .empty-hint {
   text-align: center;
-  color: #4a5568;
+  color: #9aa9ba;
   font-size: 13px;
   padding: 48px 16px;
+}
+
+.empty-group-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
 }
 
 .group-editor {
@@ -809,6 +1119,21 @@ onMounted(async () => {
 
 .group-editor p {
   color: #8899aa;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.group-actions {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.credential-help {
+  margin-top: 10px;
+  color: #aab7c7;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -834,24 +1159,52 @@ onMounted(async () => {
   overflow-wrap: anywhere;
 }
 
+.rebind-target {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 12px;
+  background: #111722;
+  border-radius: 8px;
+}
+
+.rebind-target code {
+  overflow-wrap: anywhere;
+  color: #e2e8f0;
+}
+
+.rebind-target span {
+  color: #aab7c7;
+  font-size: 12px;
+}
+
 @media (max-width: 520px) {
   .nav-panel {
     width: 52px;
   }
 
   .nav-section-title,
-  .nav-item > span,
-  .group-edit-button {
+  .nav-item span,
+  .group-edit-button,
+  .new-group-label {
     display: none;
+  }
+
+  .new-group-button {
+    align-self: center;
+    width: 44px;
+    min-height: 44px;
+    margin-inline: 0;
   }
 
   .nav-item {
     justify-content: center;
     padding: 8px;
+    min-height: 44px;
   }
 
-  .nav-divider {
-    margin-inline: 10px;
+  .nav-item-row .nav-item {
+    padding-inline-end: 8px;
   }
 
   .content-header {
@@ -862,8 +1215,27 @@ onMounted(async () => {
     min-width: 0;
   }
 
+  .search-input :deep(.n-input) {
+    min-height: 44px;
+  }
+
   .cards-scroll {
     padding: 16px 12px;
+  }
+
+  .content-header :deep(.n-button) {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .state-actions :deep(.n-button),
+  .empty-hint :deep(.n-button) {
+    min-height: 44px;
+  }
+
+  .group-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 </style>

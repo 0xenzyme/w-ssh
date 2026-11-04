@@ -2,12 +2,15 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import type {
-  CredentialKind, Session, SessionGroup, CreateSession, UpdateGroup, UpdateSession,
+  CredentialKind, Session, SessionGroup, StoredGroup, CreateGroup, CreateSession, UpdateGroup,
+  UpdateSession,
 } from '../types'
 
 export const useSessionsStore = defineStore('sessions', () => {
   const sessions = ref<Session[]>([])
-  const loading = ref(false)
+  const storedGroups = ref<StoredGroup[]>([])
+  const loading = ref(true)
+  const loadError = ref<string | null>(null)
   const notice = ref<string | null>(null)
 
   async function consumeNotice() {
@@ -20,9 +23,18 @@ export const useSessionsStore = defineStore('sessions', () => {
 
   async function fetchSessions() {
     loading.value = true
+    loadError.value = null
     try {
-      sessions.value = await invoke<Session[]>('get_sessions')
+      const [loadedSessions, loadedGroups] = await Promise.all([
+        invoke<Session[]>('get_sessions'),
+        invoke<StoredGroup[]>('get_groups'),
+      ])
+      sessions.value = loadedSessions
+      storedGroups.value = loadedGroups
       await consumeNotice()
+    } catch (error) {
+      loadError.value = String(error)
+      throw error
     } finally {
       loading.value = false
     }
@@ -31,6 +43,7 @@ export const useSessionsStore = defineStore('sessions', () => {
   async function createSession(data: CreateSession) {
     const session = await invoke<Session>('create_session', { data })
     sessions.value.push(session)
+    await fetchGroups()
     await consumeNotice()
     return session
   }
@@ -39,6 +52,7 @@ export const useSessionsStore = defineStore('sessions', () => {
     const updated = await invoke<Session>('update_session', { data })
     const idx = sessions.value.findIndex(s => s.id === data.id)
     if (idx !== -1) sessions.value[idx] = updated
+    await fetchGroups()
     await consumeNotice()
     return updated
   }
@@ -59,26 +73,66 @@ export const useSessionsStore = defineStore('sessions', () => {
     return groups
   })
 
-  const groups = computed<SessionGroup[]>(() =>
-    Object.entries(groupedSessions.value).map(([name, groupSessions]) => ({
-      name,
-      icon: groupSessions.find(session => session.group_icon)?.group_icon || 'folder',
-      sessions: groupSessions,
-      editable: name !== '未分组',
-    })),
-  )
+  const groups = computed<SessionGroup[]>(() => {
+    const result = new Map<string, SessionGroup>()
+    for (const group of storedGroups.value) {
+      result.set(group.name, {
+        name: group.name,
+        icon: group.icon || 'folder',
+        sessions: groupedSessions.value[group.name] || [],
+        editable: true,
+      })
+    }
+    for (const [name, groupSessions] of Object.entries(groupedSessions.value)) {
+      if (name === '未分组') {
+        result.set(name, {
+          name,
+          icon: 'folder',
+          sessions: groupSessions,
+          editable: false,
+        })
+      } else if (!result.has(name)) {
+        result.set(name, {
+          name,
+          icon: groupSessions.find(session => session.group_icon)?.group_icon || 'folder',
+          sessions: groupSessions,
+          editable: true,
+        })
+      }
+    }
+    return [...result.values()]
+  })
 
   function groupIconForName(name?: string) {
     if (!name) return undefined
     return groups.value.find(group => group.name === name)?.icon || 'folder'
   }
 
+  async function fetchGroups() {
+    storedGroups.value = await invoke<StoredGroup[]>('get_groups')
+  }
+
+  async function createGroup(data: CreateGroup) {
+    const group = await invoke<StoredGroup>('create_group', { data })
+    storedGroups.value = [...storedGroups.value, group]
+      .sort((a, b) => a.name.localeCompare(b.name))
+    await consumeNotice()
+    return group
+  }
+
   async function updateGroup(data: UpdateGroup) {
     const updated = await invoke<Session[]>('update_group', { data })
     const byId = new Map(updated.map(session => [session.id, session]))
     sessions.value = sessions.value.map(session => byId.get(session.id) || session)
+    await fetchGroups()
     await consumeNotice()
     return updated
+  }
+
+  async function deleteGroup(name: string) {
+    await invoke('delete_group', { name })
+    storedGroups.value = storedGroups.value.filter(group => group.name !== name)
+    await consumeNotice()
   }
 
   function clearNotice() {
@@ -113,9 +167,25 @@ export const useSessionsStore = defineStore('sessions', () => {
     return updated
   }
 
+  async function deleteCredential(sessionId: string, kind: CredentialKind) {
+    const updated = await invoke<Session>('delete_session_credential', {
+      sessionId,
+      kind,
+    })
+    replaceSession(updated)
+    return updated
+  }
+
+  async function deleteLegacyCredential(sessionId: string) {
+    await invoke<boolean>('delete_legacy_credential', { sessionId })
+    await fetchSessions()
+  }
+
   return {
     sessions,
+    storedGroups,
     loading,
+    loadError,
     notice,
     fetchSessions,
     createSession,
@@ -124,11 +194,15 @@ export const useSessionsStore = defineStore('sessions', () => {
     setCredential,
     confirmCredentialRebind,
     migrateLegacyCredential,
+    deleteCredential,
+    deleteLegacyCredential,
     replaceSession,
     clearNotice,
     groupedSessions,
     groups,
     groupIconForName,
+    createGroup,
     updateGroup,
+    deleteGroup,
   }
 })

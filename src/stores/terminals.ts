@@ -36,9 +36,16 @@ export const useTerminalsStore = defineStore('terminals', () => {
   async function closeTab(terminalId: string) {
     await invoke('ssh_disconnect', { terminalId })
     const idx = tabs.value.findIndex(t => t.id === terminalId)
+    if (idx === -1) return
     tabs.value.splice(idx, 1)
     if (activeTabId.value === terminalId) {
-      activeTabId.value = tabs.value[tabs.value.length - 1]?.id ?? null
+      activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)]?.id ?? null
+    }
+  }
+
+  function selectTab(terminalId: string | null) {
+    if (terminalId === null || tabs.value.some(tab => tab.id === terminalId)) {
+      activeTabId.value = terminalId
     }
   }
 
@@ -47,5 +54,5 @@ export const useTerminalsStore = defineStore('terminals', () => {
     if (tab) tab.connected = false
   }
 
-  return { tabs, activeTabId, openTerminal, closeTab, markDisconnected }
+  return { tabs, activeTabId, openTerminal, closeTab, selectTab, markDisconnected }
 })

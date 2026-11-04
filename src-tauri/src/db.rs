@@ -5,7 +5,8 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use crate::models::{
-    AuthMethod, CreateSession, CredentialKind, CredentialState, Session, UpdateGroup, UpdateSession,
+    AuthMethod, CreateGroup, CreateSession, CredentialKind, CredentialState, Session, SessionGroup,
+    UpdateGroup, UpdateSession,
 };
 use crate::storage::{now_str, SessionStorage};
 
@@ -65,6 +66,34 @@ impl SqliteSessionStorage {
                 .await?;
             }
         }
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS session_groups (
+                name TEXT PRIMARY KEY,
+                icon TEXT NOT NULL DEFAULT 'folder',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO session_groups (name, icon, created_at, updated_at)
+            SELECT TRIM(group_name),
+                   COALESCE(MAX(NULLIF(TRIM(group_icon), '')), 'folder'),
+                   MIN(created_at),
+                   MAX(updated_at)
+            FROM sessions
+            WHERE group_name IS NOT NULL AND TRIM(group_name) <> ''
+            GROUP BY TRIM(group_name)
+            "#,
+        )
+        .execute(&pool)
+        .await?;
 
         sqlx::query(
             r#"
@@ -283,6 +312,15 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Session {
     }
 }
 
+fn row_to_group(row: &sqlx::sqlite::SqliteRow) -> SessionGroup {
+    SessionGroup {
+        name: row.get("name"),
+        icon: row.get("icon"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
 const SESSION_COLUMNS: &str =
     "id, name, host, port, username, private_key, icon, group_name, group_icon, created_at, updated_at";
 
@@ -294,14 +332,78 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(rows.iter().map(row_to_session).collect())
     }
 
+    async fn list_groups(&self) -> Result<Vec<SessionGroup>> {
+        let rows = sqlx::query(
+            "SELECT name, icon, created_at, updated_at FROM session_groups ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(row_to_group).collect())
+    }
+
     async fn get(&self, id: &str) -> Result<Session> {
         let sql = format!("SELECT {SESSION_COLUMNS} FROM sessions WHERE id=?");
         let row = sqlx::query(&sql).bind(id).fetch_one(&self.pool).await?;
         Ok(row_to_session(&row))
     }
 
+    async fn create_group(&self, data: CreateGroup) -> Result<SessionGroup> {
+        let name = data.name.trim();
+        validate_group_fields(name, data.icon.as_deref())?;
+        let icon = data.icon.as_deref().unwrap_or("folder");
+        let now = now_str();
+        let result = sqlx::query(
+            "INSERT OR IGNORE INTO session_groups (name, icon, created_at, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(name)
+        .bind(icon)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            bail!("分组已存在，请使用其他名称");
+        }
+        let row = sqlx::query(
+            "SELECT name, icon, created_at, updated_at FROM session_groups WHERE name=?",
+        )
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row_to_group(&row))
+    }
+
+    async fn delete_group(&self, name: &str) -> Result<()> {
+        let name = name.trim();
+        validate_group_fields(name, None)?;
+        let mut tx = self.pool.begin().await?;
+        let session_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE group_name=?")
+                .bind(name)
+                .fetch_one(&mut *tx)
+                .await?;
+        if session_count > 0 {
+            bail!("分组中仍有主机，请先移动或删除这些主机");
+        }
+        let result = sqlx::query("DELETE FROM session_groups WHERE name=?")
+            .bind(name)
+            .execute(&mut *tx)
+            .await?;
+        if result.rows_affected() == 0 {
+            bail!("分组不存在: {name}");
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn create(&self, data: CreateSession) -> Result<Session> {
         validate_auth(data.auth_method, data.private_key.as_deref())?;
+        ensure_sqlite_group(
+            &self.pool,
+            data.group_name.as_deref(),
+            data.group_icon.as_deref(),
+        )
+        .await?;
         let id = Uuid::new_v4().to_string();
         let now = now_str();
         sqlx::query(
@@ -327,6 +429,12 @@ impl SessionStorage for SqliteSessionStorage {
 
     async fn update(&self, data: UpdateSession) -> Result<Session> {
         validate_auth(data.auth_method, data.private_key.as_deref())?;
+        ensure_sqlite_group(
+            &self.pool,
+            data.group_name.as_deref(),
+            data.group_icon.as_deref(),
+        )
+        .await?;
         let now = now_str();
         sqlx::query(
             "UPDATE sessions SET name=?, host=?, port=?, username=?, private_key=?, icon=?, group_name=?, group_icon=?, updated_at=? WHERE id=?",
@@ -354,7 +462,7 @@ impl SessionStorage for SqliteSessionStorage {
         let mut tx = self.pool.begin().await?;
         if current_name != name {
             let conflict: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE group_name=?")
+                sqlx::query_scalar("SELECT COUNT(*) FROM session_groups WHERE name=?")
                     .bind(name)
                     .fetch_one(&mut *tx)
                     .await?;
@@ -363,7 +471,19 @@ impl SessionStorage for SqliteSessionStorage {
             }
         }
 
-        let result = sqlx::query(
+        let result =
+            sqlx::query("UPDATE session_groups SET name=?, icon=?, updated_at=? WHERE name=?")
+                .bind(name)
+                .bind(data.icon.as_deref().unwrap_or("folder"))
+                .bind(now_str())
+                .bind(current_name)
+                .execute(&mut *tx)
+                .await?;
+        if result.rows_affected() == 0 {
+            bail!("分组不存在: {current_name}");
+        }
+
+        sqlx::query(
             "UPDATE sessions SET group_name=?, group_icon=?, updated_at=? WHERE group_name=?",
         )
         .bind(name)
@@ -372,9 +492,6 @@ impl SessionStorage for SqliteSessionStorage {
         .bind(current_name)
         .execute(&mut *tx)
         .await?;
-        if result.rows_affected() == 0 {
-            bail!("分组不存在: {current_name}");
-        }
         tx.commit().await?;
 
         let sql =
@@ -397,13 +514,31 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(())
     }
 
-    async fn import_if_empty(&self, sessions: Vec<Session>) -> Result<()> {
+    async fn import_if_empty(
+        &self,
+        sessions: Vec<Session>,
+        groups: Vec<SessionGroup>,
+    ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
-            .fetch_one(&mut *tx)
-            .await?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT (SELECT COUNT(*) FROM sessions) + (SELECT COUNT(*) FROM session_groups)",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
         if count != 0 {
             bail!("SQLite 目标存储非空，复制已取消");
+        }
+        for group in groups {
+            validate_group_fields(&group.name, Some(&group.icon))?;
+            sqlx::query(
+                "INSERT INTO session_groups (name, icon, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(group.name)
+            .bind(group.icon)
+            .bind(group.created_at)
+            .bind(group.updated_at)
+            .execute(&mut *tx)
+            .await?;
         }
         for session in sessions {
             sqlx::query(
@@ -439,14 +574,15 @@ fn validate_auth(auth: AuthMethod, private_key: Option<&str>) -> Result<()> {
 }
 
 fn validate_group(current_name: &str, name: &str, icon: Option<&str>) -> Result<()> {
-    if current_name.is_empty() || name.is_empty() {
+    validate_group_fields(current_name, icon)?;
+    validate_group_fields(name, icon)
+}
+
+fn validate_group_fields(name: &str, icon: Option<&str>) -> Result<()> {
+    if name.is_empty() {
         bail!("分组名称不能为空");
     }
-    if current_name.len() > 200
-        || name.len() > 200
-        || current_name.contains('\0')
-        || name.contains('\0')
-    {
+    if name.len() > 200 || name.contains('\0') {
         bail!("分组名称无效或过长");
     }
     if icon.is_some_and(|value| value.len() > 64 || value.contains('\0')) {
@@ -455,10 +591,49 @@ fn validate_group(current_name: &str, name: &str, icon: Option<&str>) -> Result<
     Ok(())
 }
 
+async fn ensure_sqlite_group(
+    pool: &SqlitePool,
+    name: Option<&str>,
+    icon: Option<&str>,
+) -> Result<()> {
+    let Some(name) = name.map(str::trim).filter(|name| !name.is_empty()) else {
+        return Ok(());
+    };
+    validate_group_fields(name, icon)?;
+    let now = now_str();
+    sqlx::query(
+        "INSERT OR IGNORE INTO session_groups (name, icon, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(name)
+    .bind(icon.unwrap_or("folder"))
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::assert_storage_contract;
+
+    async fn remove_db_file(path: std::path::PathBuf) {
+        let mut last_error = None;
+        for _ in 0..20 {
+            match std::fs::remove_file(&path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => last_error = Some(error),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!(
+            "failed to remove temporary SQLite database {}: {}",
+            path.display(),
+            last_error.expect("cleanup retries must preserve the last error")
+        );
+    }
 
     #[tokio::test]
     async fn sqlite_implements_session_storage_contract() {
@@ -468,7 +643,8 @@ mod tests {
             .unwrap();
         assert_storage_contract(&storage).await;
         storage.pool.close().await;
-        std::fs::remove_file(path).unwrap();
+        drop(storage);
+        remove_db_file(path).await;
     }
 
     #[tokio::test]
@@ -497,6 +673,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, name, host, port, username, group_name, created_at, updated_at) VALUES ('legacy-host', 'Legacy host', 'legacy.test', 22, 'user', 'Legacy', '1', '1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         pool.close().await;
 
         let storage = SqliteSessionStorage::open(path.to_str().unwrap())
@@ -510,8 +692,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(columns, vec!["group_icon", "icon"]);
+        let groups = storage.list_groups().await.unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Legacy");
+        assert_eq!(groups[0].icon, "folder");
         storage.pool.close().await;
-        std::fs::remove_file(path).unwrap();
+        drop(storage);
+        remove_db_file(path).await;
     }
 
     #[tokio::test]
@@ -551,6 +738,7 @@ mod tests {
             Some("fixture-secret")
         );
         storage.pool.close().await;
-        std::fs::remove_file(path).unwrap();
+        drop(storage);
+        remove_db_file(path).await;
     }
 }

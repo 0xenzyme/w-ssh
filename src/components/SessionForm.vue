@@ -3,7 +3,7 @@
     v-model:show="visible"
     :title="isEdit ? '编辑会话' : '新建会话'"
     preset="dialog"
-    style="width: 480px"
+    class="session-modal"
     :show-icon="false"
     @after-leave="resetForm"
   >
@@ -15,74 +15,89 @@
       label-width="80px"
       require-mark-placement="right-hanging"
     >
-      <n-form-item label="会话名称" path="name">
-        <n-input v-model:value="form.name" placeholder="例如：生产服务器" />
-      </n-form-item>
-      <n-form-item label="主机图标">
-        <IconSelect v-model="form.icon" />
-      </n-form-item>
-      <n-form-item label="主机地址" path="host">
-        <n-input v-model:value="form.host" placeholder="IP 或域名" />
-      </n-form-item>
-      <n-form-item label="端口" path="port">
-        <n-input-number v-model:value="form.port" :min="1" :max="65535" style="width:100%" />
-      </n-form-item>
-      <n-form-item label="用户名" path="username">
-        <n-input v-model:value="form.username" placeholder="例如：root" />
-      </n-form-item>
-      <n-form-item label="分组" path="group_name">
-        <n-select
-          v-model:value="form.group_name"
-          :options="groupOptions"
-          :render-label="renderGroupLabel"
-          filterable
-          tag
-          clearable
-          placeholder="选择或输入新分组"
-        />
-      </n-form-item>
-      <n-form-item label="认证方式">
-        <n-radio-group v-model:value="authType">
-          <n-radio value="password">密码</n-radio>
-          <n-radio value="key">私钥</n-radio>
-        </n-radio-group>
-      </n-form-item>
-      <n-form-item v-if="authType === 'password'" label="密码">
-        <n-input
-          v-model:value="form.secret"
-          type="password"
-          show-password-on="click"
-          :placeholder="isEdit ? '留空则不修改已保存凭据' : '可留空，连接时再输入'"
-        />
-      </n-form-item>
-      <template v-else>
-        <n-form-item label="私钥路径" path="private_key">
-          <n-select
-            v-model:value="form.private_key"
-            :options="keyOptions"
-            filterable
-            tag
-            placeholder="选择或手动输入私钥路径"
-            :loading="loadingKeys"
-          />
+      <section class="form-section" aria-labelledby="connection-section-title">
+        <h3 id="connection-section-title">连接信息</h3>
+        <n-form-item label="会话名称" path="name">
+          <n-input v-model:value="form.name" maxlength="100" placeholder="例如：生产服务器" />
         </n-form-item>
-        <n-form-item label="密钥口令">
+        <n-form-item label="主机地址" path="host">
+          <n-input v-model:value="form.host" maxlength="255" placeholder="IP 或域名" />
+        </n-form-item>
+        <n-form-item label="端口" path="port">
+          <n-input-number v-model:value="form.port" :min="1" :max="65535" style="width:100%" />
+        </n-form-item>
+        <n-form-item label="用户名" path="username">
+          <n-input v-model:value="form.username" maxlength="100" placeholder="例如：root" />
+        </n-form-item>
+      </section>
+
+      <section class="form-section" aria-labelledby="auth-section-title">
+        <h3 id="auth-section-title">认证</h3>
+        <n-form-item label="认证方式">
+          <n-radio-group v-model:value="authType">
+            <n-radio value="password">密码</n-radio>
+            <n-radio value="key">私钥</n-radio>
+          </n-radio-group>
+        </n-form-item>
+        <n-form-item v-if="authType === 'password'" label="密码">
           <n-input
             v-model:value="form.secret"
             type="password"
             show-password-on="click"
-            placeholder="Passphrase 可选，默认留空"
+            :placeholder="isEdit ? '留空则不修改已保存凭据' : '可留空，连接时再输入'"
           />
         </n-form-item>
-      </template>
-      <n-form-item v-if="form.secret" label="凭据保存">
-        <n-checkbox v-model:checked="saveCredential">
-          保存到系统凭据库
-        </n-checkbox>
-      </n-form-item>
-      <n-alert type="info" :show-icon="false" class="credential-alert">
-        会话文件只保存连接资料；密码与 passphrase 不写入 SQLite 或 YAML。
-      </n-alert>
+        <template v-else>
+          <n-form-item label="私钥路径" path="private_key">
+            <n-select
+              v-model:value="form.private_key"
+              :options="keyOptions"
+              filterable
+              tag
+              placeholder="选择已发现的私钥，或输入路径"
+              :loading="loadingKeys"
+            />
+          </n-form-item>
+          <n-alert v-if="keyScanMessage" type="warning" :show-icon="false" class="key-scan-alert">
+            {{ keyScanMessage }}
+          </n-alert>
+          <n-form-item label="私钥口令">
+            <n-input
+              v-model:value="form.secret"
+              type="password"
+              show-password-on="click"
+              placeholder="可选；未加密私钥请留空"
+            />
+          </n-form-item>
+        </template>
+        <n-form-item v-if="form.secret" label="凭据保存">
+          <n-checkbox v-model:checked="saveCredential">
+            保存到系统凭据库
+          </n-checkbox>
+        </n-form-item>
+        <n-alert type="info" :show-icon="false" class="credential-alert">
+          会话文件只保存连接资料；密码和私钥口令不会写入 SQLite 或 YAML。
+        </n-alert>
+      </section>
+
+      <n-collapse class="organization-collapse">
+        <n-collapse-item name="organization" title="分组与图标（可选）">
+          <n-form-item label="分组" path="group_name">
+            <n-select
+              v-model:value="form.group_name"
+              :options="groupOptions"
+              :render-label="renderGroupLabel"
+              filterable
+              tag
+              clearable
+              placeholder="选择或输入新分组"
+            />
+          </n-form-item>
+          <n-form-item label="主机图标">
+            <IconSelect v-model="form.icon" />
+          </n-form-item>
+        </n-collapse-item>
+      </n-collapse>
     </n-form>
 
     <template #action>
@@ -100,7 +115,7 @@
 import { h, ref, watch, computed } from 'vue'
 import {
   NModal, NForm, NFormItem, NInput, NInputNumber, NSelect,
-  NButton, NSpace, NRadioGroup, NRadio, NAlert, NCheckbox, NIcon,
+  NButton, NSpace, NRadioGroup, NRadio, NAlert, NCheckbox, NCollapse, NCollapseItem, NIcon,
   useMessage, type FormInst, type FormRules, type SelectOption,
 } from 'naive-ui'
 import { invoke } from '@tauri-apps/api/core'
@@ -132,10 +147,9 @@ const saveCredential = ref(true)
 // 系统私钥检测
 const availableKeys = ref<string[]>([])
 const loadingKeys = ref(false)
-const fallbackKeyPaths = ['~/.ssh/id_ed25519', '~/.ssh/id_rsa']
+const keyScanMessage = ref('')
 const keyOptions = computed(() => {
-  const keys = availableKeys.value.length > 0 ? availableKeys.value : fallbackKeyPaths
-  return keys.map(key => ({
+  return availableKeys.value.map(key => ({
     label: `~/.ssh/${key.replace(/\\/g, '/').split('/').pop()}`,
     value: key,
   }))
@@ -149,11 +163,14 @@ watch(authType, async (type, previous) => {
     try {
       availableKeys.value = await invoke<string[]>('get_ssh_key_paths')
       if (!form.value.private_key) {
-        form.value.private_key = availableKeys.value[0] || fallbackKeyPaths[0]
+        form.value.private_key = availableKeys.value[0] || ''
       }
+      keyScanMessage.value = availableKeys.value.length === 0
+        ? '没有发现常用私钥文件。请输入一个实际存在的私钥路径。'
+        : ''
     } catch {
       availableKeys.value = []
-      if (!form.value.private_key) form.value.private_key = fallbackKeyPaths[0]
+      keyScanMessage.value = '无法扫描私钥目录。你仍可以手动输入私钥路径。'
     } finally {
       loadingKeys.value = false
     }
@@ -193,6 +210,10 @@ const rules: FormRules = {
   name: [{ required: true, message: '请输入会话名称' }],
   host: [{ required: true, message: '请输入主机地址' }],
   username: [{ required: true, message: '请输入用户名' }],
+  private_key: [{
+    validator: () => authType.value !== 'key' || Boolean(form.value.private_key?.trim()),
+    message: '请选择或输入私钥路径',
+  }],
 }
 
 watch(
@@ -225,6 +246,7 @@ function resetForm() {
   isEdit.value = false
   authType.value = 'password'
   saveCredential.value = true
+  keyScanMessage.value = ''
 }
 
 async function handleSubmit() {
@@ -279,9 +301,43 @@ async function handleSubmit() {
 </script>
 
 <style scoped>
+:global(.session-modal) {
+  display: flex;
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  flex-direction: column;
+  overflow: hidden;
+}
+
+:global(.session-modal .n-dialog__content) {
+  min-height: 0;
+  overflow-y: auto;
+  padding-inline-end: 4px;
+}
+
+.form-section + .form-section {
+  margin-top: 22px;
+}
+
+.form-section h3 {
+  margin: 0 0 14px 80px;
+  color: #dbe5f1;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .credential-alert {
-  margin: 0 0 18px 80px;
+  margin: 0 0 0 80px;
   width: calc(100% - 80px);
+}
+
+.key-scan-alert {
+  margin: -8px 0 16px 80px;
+  width: calc(100% - 80px);
+}
+
+.organization-collapse {
+  margin-top: 22px;
 }
 
 
@@ -289,5 +345,36 @@ async function handleSubmit() {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+@media (max-width: 520px) {
+  .form-section h3 {
+    margin-inline-start: 0;
+  }
+
+  .credential-alert,
+  .key-scan-alert {
+    width: 100%;
+    margin-inline-start: 0;
+  }
+
+  :deep(.n-form-item) {
+    display: block;
+  }
+
+  :deep(.n-form-item-label) {
+    width: auto !important;
+    min-height: 28px;
+  }
+
+  :deep(.n-button) {
+    min-height: 44px;
+  }
+
+  :deep(.n-input),
+  :deep(.n-input-number),
+  :deep(.n-base-selection) {
+    min-height: 44px;
+  }
 }
 </style>

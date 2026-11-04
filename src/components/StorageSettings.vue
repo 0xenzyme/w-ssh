@@ -60,7 +60,7 @@
         </div>
 
         <n-alert v-if="isChangingBackend" type="warning" :show-icon="false">
-          直接应用只切换后端，不复制会话。复制并切换只接受空目标，成功后保留源数据。
+          仅切换会打开目标存储，但不会复制当前主机；复制并切换只接受空目标，成功后保留源数据。
         </n-alert>
       </div>
     </n-spin>
@@ -71,6 +71,7 @@
         <div class="primary-actions">
           <n-button
             v-if="isChangingBackend"
+            type="primary"
             :loading="store.copying"
             :disabled="busy || !selectionValid"
             @click="handleCopy"
@@ -78,14 +79,33 @@
             <template #icon><n-icon :component="CopyOutline" /></template>
             复制并切换
           </n-button>
+          <n-popconfirm
+            v-if="isChangingBackend"
+            positive-text="仅切换"
+            negative-text="取消"
+            @positive-click="handleApply"
+          >
+            <template #trigger>
+              <n-button
+                secondary
+                :loading="store.applying"
+                :disabled="busy || !selectionValid"
+              >
+                <template #icon><n-icon :component="CheckmarkOutline" /></template>
+                仅切换，不复制
+              </n-button>
+            </template>
+            切换后只显示目标存储中的主机。当前存储不会删除，但其主机不会自动出现在目标中。
+          </n-popconfirm>
           <n-button
+            v-else
             type="primary"
             :loading="store.applying"
             :disabled="busy || !selectionValid"
             @click="handleApply"
           >
             <template #icon><n-icon :component="CheckmarkOutline" /></template>
-            应用
+            保存设置
           </n-button>
         </div>
       </div>
@@ -312,6 +332,18 @@ async function handleCopy() {
   }
 
   .primary-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-body :deep(.n-input),
+  .settings-body :deep(.n-radio-button),
+  .legacy-actions :deep(.n-button),
+  .modal-actions :deep(.n-button) {
+    min-height: 44px;
+  }
+
+  .legacy-actions {
     align-items: stretch;
     flex-direction: column;
   }

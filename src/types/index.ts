@@ -32,6 +32,18 @@ export interface CreateSession {
 
 export type UpdateSession = CreateSession & { id: string }
 
+export interface StoredGroup {
+  name: string
+  icon: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateGroup {
+  name: string
+  icon?: string
+}
+
 export interface UpdateGroup {
   current_name: string
   name: string

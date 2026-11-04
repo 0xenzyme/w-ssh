@@ -133,8 +133,9 @@ loop {
 
 ```
 sessions[]          ← loaded from the active backend via get_sessions
+storedGroups[]       ← persisted group metadata via get_groups
 groupedSessions     ← computed: sessions grouped by group_name (default: "未分组")
-groups              ← computed group name/icon metadata for navigation and selectors
+groups              ← stored groups merged with their current sessions and "未分组"
 ```
 Mutations go through Tauri invoke calls; the store updates its local ref on success.
 
@@ -176,9 +177,15 @@ TerminalTab {
   session_name,
   connected        // false after ssh_closed event
 }
+
+StoredGroup {
+  name,
+  icon,
+  created_at, updated_at
+}
 ```
 
-Groups remain derived rather than using a separate table. `update_group` performs one atomic backend mutation so SQLite and YAML cannot expose a partially renamed group.
+Groups are persisted independently so an empty group remains visible. SQLite stores them in `session_groups`; YAML schema v1 stores an optional `groups` collection and upgrades older session-derived groups on the next write. `update_group` performs one atomic backend mutation so SQLite and YAML cannot expose a partially renamed group; `delete_group` rejects non-empty groups in both backends.
 
 ---
 
@@ -186,7 +193,7 @@ Groups remain derived rather than using a separate table. `update_group` perform
 
 - Real Windows/macOS/Linux credential providers and real SSH servers are not covered by deterministic automated tests.
 - Host certificates/CA, SSHFP, ssh-agent, PKCS#11, hardware keys, and global `~/.ssh/known_hosts` integration are not implemented.
-- **Keys / Port Forwarding / Logs** sections in VaultsView are placeholders
+- Key inventory, port forwarding, and connection-log workspaces are not implemented; the navigation only exposes working host management features.
 
 ## Trust And Credential Safety Model
 
@@ -200,7 +207,7 @@ Groups remain derived rather than using a separate table. `update_group` perform
 ## Storage Safety Model
 
 - With no `storage-settings.json`, the existing `{app_data_dir}/sessions.db` remains active.
-- YAML accepts only schema version 1 and a restricted YAML 1.2 subset. Anchors, aliases, tags, merge keys, duplicate IDs, unknown fields, invalid ports, secret fields, and embedded private-key content are rejected.
+- YAML accepts only schema version 1 and a restricted YAML 1.2 subset. Its optional `groups` collection preserves empty groups while remaining compatible with older session-only files. Anchors, aliases, tags, merge keys, duplicate IDs/group names, unknown fields, invalid ports, secret fields, and embedded private-key content are rejected.
 - YAML writes are serialized and atomically replace the target. A non-canonical valid file, including one with comments, receives an exact sibling recovery backup before normalization.
 - A saved but damaged YAML selection is reported as unavailable; the app does not silently read or mutate SQLite instead.
-- Copying is explicit, only targets an empty backend, verifies records before switching, and keeps the source unchanged.
+- Copying is explicit, only targets an empty backend, verifies sessions and groups before switching, and keeps the source unchanged.
